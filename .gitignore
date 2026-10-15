@@ -61,8 +61,8 @@ Thumbs.db
 *.feather
 
 # Model checkpoints & weights
-checkpoints/
-models/
+/checkpoints/
+/models/
 *.pt
 *.pth
 *.bin
