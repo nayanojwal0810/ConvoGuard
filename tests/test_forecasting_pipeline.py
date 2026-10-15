@@ -15,6 +15,9 @@ Tests all Task G requirements using small synthetic fixtures:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -621,3 +624,69 @@ def test_artifact_saving_and_packaging_runtime_path(tmp_path: Path):
             assert recovered_meta["hyperparameters"]["seed"] == 42
             assert recovered_meta["best_validation_metrics"]["macro_f1"] == 0.64
 
+
+
+
+def test_core_model_imports_without_optional_bert_dependencies():
+    """CPU APIs import without torch/transformers; BERT requests explain the extra."""
+    repo_root = Path(__file__).resolve().parents[1]
+    source_root = repo_root / "src"
+    blocker_script = r"""
+import importlib.abc
+import sys
+
+BLOCKED_ROOTS = {"torch", "transformers"}
+
+class BlockOptionalBertDependencies(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] in BLOCKED_ROOTS:
+            raise ModuleNotFoundError(
+                f"No module named {fullname!r} (blocked by dependency-isolation test)",
+                name=fullname,
+            )
+        return None
+
+sys.meta_path.insert(0, BlockOptionalBertDependencies())
+
+from convoguard.models.baselines import StaticTfidfBaseline
+from convoguard.models.evaluation import find_optimal_threshold
+from convoguard.models.artifacts import package_artifacts, save_model_artifacts
+
+assert StaticTfidfBaseline.__name__ == "StaticTfidfBaseline"
+assert callable(find_optimal_threshold)
+assert callable(package_artifacts)
+assert callable(save_model_artifacts)
+assert "torch" not in sys.modules
+assert "transformers" not in sys.modules
+
+def expect_clear_bert_dependency_error(statement):
+    try:
+        exec(statement, {})
+    except ImportError as exc:
+        message = str(exc).lower()
+        assert "optional" in message, message
+        assert "pip install -e" in message, message
+        assert ".[bert]" in message, message
+    else:
+        raise AssertionError(f"Expected missing-optional-dependency error for: {statement}")
+
+expect_clear_bert_dependency_error("from convoguard.models import BertForecastingClassifier")
+expect_clear_bert_dependency_error("from convoguard.models.bert import BertForecastingClassifier")
+print("CPU imports passed; BERT imports fail with actionable optional-dependency guidance.")
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(source_root) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-c", blocker_script],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "Optional-dependency isolation subprocess failed.\n"
+        f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    )
+    assert "CPU imports passed" in result.stdout
