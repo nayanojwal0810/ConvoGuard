@@ -21,13 +21,20 @@ import logging
 from typing import Any
 
 import numpy as np
-import torch
-import torch.nn as nn
-from transformers import (
-    BertConfig,
-    BertForSequenceClassification,
-    PreTrainedTokenizerBase,
-)
+
+try:
+    import torch
+    import torch.nn as nn
+    from transformers import (
+        BertConfig,
+        BertForSequenceClassification,
+        PreTrainedTokenizerBase,
+    )
+except ImportError as exc:
+    raise ImportError(
+        "ConvoGuard BERT forecasting requires the optional PyTorch and Transformers "
+        "dependencies. Install them with pip install -e '.[bert]'."
+    ) from exc
 
 logger = logging.getLogger(__name__)
 
