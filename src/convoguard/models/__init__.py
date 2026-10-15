@@ -1,5 +1,7 @@
-"""Model architectures, baselines, and evaluation routines for ConvoGuard."""
-
+from convoguard.models.artifacts import (
+    package_artifacts,
+    save_model_artifacts,
+)
 from convoguard.models.baselines import (
     DynamicTfidfBaseline,
     PriorBaseline,
@@ -34,4 +36,6 @@ __all__ = [
     "BertForecastingDataset",
     "pad_bert_collate",
     "turn_preserving_truncate",
+    "save_model_artifacts",
+    "package_artifacts",
 ]

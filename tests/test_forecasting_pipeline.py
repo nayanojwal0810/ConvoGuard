@@ -15,7 +15,6 @@ Tests all Task G requirements using small synthetic fixtures:
 from __future__ import annotations
 
 import json
-import shutil
 import zipfile
 from pathlib import Path
 
@@ -32,6 +31,10 @@ from convoguard.data.forecasting import (
     validate_forecasting_conversation,
 )
 from convoguard.data.loader import DatasetValidationError
+from convoguard.models.artifacts import (
+    package_artifacts,
+    save_model_artifacts,
+)
 from convoguard.models.baselines import PriorBaseline, StaticTfidfBaseline
 from convoguard.models.bert import turn_preserving_truncate
 from convoguard.models.evaluation import (
@@ -496,7 +499,6 @@ def test_serialize_run_config_with_path_objects():
 def test_artifact_saving_and_packaging_runtime_path(tmp_path: Path):
     output_dir = tmp_path / "outputs_bert_baselines"
     ckpt_dir = output_dir / "checkpoints" / "bert_sc_static"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     config = {
         "model_name": "bert-base-uncased",
@@ -505,21 +507,39 @@ def test_artifact_saving_and_packaging_runtime_path(tmp_path: Path):
         "seed": 42,
     }
 
-    # 1. Preflight check
+    # 1. Preflight check: verify configuration containing Path values serializes cleanly
     safe_config = serialize_run_config(config)
     preflight_json = json.dumps(safe_config, indent=2)
     assert "outputs_bert_baselines" in preflight_json
+    recovered_preflight = json.loads(preflight_json)
+    assert isinstance(recovered_preflight["output_dir"], str)
 
-    # 2. Save model weights
-    dummy_model = torch.nn.Linear(4, 2)
-    torch.save(dummy_model.state_dict(), ckpt_dir / "model.pt")
+    # 2. Lightweight mock model and tokenizer objects
+    class MockConfig:
+        def save_pretrained(self, save_directory: str | Path) -> None:
+            save_path = Path(save_directory)
+            save_path.mkdir(parents=True, exist_ok=True)
+            with open(save_path / "config.json", "w", encoding="utf-8") as f:
+                json.dump({"architectures": ["BertForSequenceClassification"]}, f)
 
-    # 3. Save tokenizer & config mock files
-    (ckpt_dir / "tokenizer_config.json").write_text('{"do_lower_case": true}', encoding="utf-8")
-    (ckpt_dir / "vocab.txt").write_text("[CLS]\n[SEP]\n", encoding="utf-8")
-    (ckpt_dir / "config.json").write_text('{"architectures": ["BertForSequenceClassification"]}', encoding="utf-8")
+    class MockModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 2)
+            self.config = MockConfig()
 
-    # 4. Save run metadata and validation metrics
+    class MockTokenizer:
+        def save_pretrained(self, save_directory: str | Path) -> None:
+            save_path = Path(save_directory)
+            save_path.mkdir(parents=True, exist_ok=True)
+            with open(save_path / "tokenizer_config.json", "w", encoding="utf-8") as f:
+                json.dump({"do_lower_case": True}, f)
+            with open(save_path / "vocab.txt", "w", encoding="utf-8") as f:
+                f.write("[CLS]\n[SEP]\n")
+
+    mock_model = MockModel()
+    mock_tokenizer = MockTokenizer()
+
     val_metrics = {
         "accuracy": 0.65,
         "macro_f1": 0.64,
@@ -527,16 +547,48 @@ def test_artifact_saving_and_packaging_runtime_path(tmp_path: Path):
         "positive_alert_coverage": 0.70,
         "negative_false_alert_rate": 0.35,
     }
-    run_metadata = {
-        "hyperparameters": safe_config,
-        "best_validation_metrics": val_metrics,
-    }
-    with open(ckpt_dir / "run_config.json", "w", encoding="utf-8") as f:
-        json.dump(run_metadata, f, indent=2)
-    with open(ckpt_dir / "val_metrics.json", "w", encoding="utf-8") as f:
-        json.dump(val_metrics, f, indent=2)
 
-    # 5. Save consolidated metrics file
+    # 3. Call the actual production save_model_artifacts function
+    saved_ckpt_dir = save_model_artifacts(
+        model=mock_model,
+        tokenizer=mock_tokenizer,
+        checkpoint_dir=ckpt_dir,
+        config_dict=config,
+        metrics=val_metrics,
+    )
+    assert saved_ckpt_dir == ckpt_dir.resolve()
+
+    # 4. Verify model weights are saved
+    weights_file = ckpt_dir / "model.pt"
+    assert weights_file.exists(), "Production save_model_artifacts failed to save model.pt"
+    assert weights_file.stat().st_size > 0
+
+    # 5. Verify tokenizer and model configuration files are written
+    assert (ckpt_dir / "config.json").exists(), "Model configuration file was not written"
+    assert (ckpt_dir / "tokenizer_config.json").exists(), "Tokenizer configuration was not written"
+    assert (ckpt_dir / "vocab.txt").exists(), "Tokenizer vocab file was not written"
+
+    # 6. Verify run_config.json serializes a configuration containing Path values
+    run_cfg_file = ckpt_dir / "run_config.json"
+    assert run_cfg_file.exists(), "run_config.json was not created by production save_model_artifacts"
+    with open(run_cfg_file, encoding="utf-8") as f:
+        run_metadata = json.load(f)
+    assert isinstance(
+        run_metadata["hyperparameters"]["output_dir"], str
+    ), "Path was not serialized to string in run_config.json"
+    assert "outputs_bert_baselines" in run_metadata["hyperparameters"]["output_dir"]
+    assert "library_versions" in run_metadata
+    assert "torch" in run_metadata["library_versions"]
+
+    # 7. Verify val_metrics.json contains expected validation metrics
+    val_metrics_file = ckpt_dir / "val_metrics.json"
+    assert val_metrics_file.exists(), "val_metrics.json was not created by production save_model_artifacts"
+    with open(val_metrics_file, encoding="utf-8") as f:
+        loaded_val_metrics = json.load(f)
+    assert loaded_val_metrics["macro_f1"] == 0.64
+    assert loaded_val_metrics["positive_alert_coverage"] == 0.70
+
+    # 8. Create consolidated metrics file before ZIP packaging
     final_metrics_file = output_dir / "bert_baselines_validation_metrics.json"
     final_results = {
         "metadata": {"hyperparameters": safe_config},
@@ -545,19 +597,22 @@ def test_artifact_saving_and_packaging_runtime_path(tmp_path: Path):
     with open(final_metrics_file, "w", encoding="utf-8") as f:
         json.dump(final_results, f, indent=2)
 
-    # 6. Test ZIP packaging
-    zip_base = tmp_path / "convoguard_phase2_bert_outputs"
-    zip_archive = shutil.make_archive(str(zip_base), "zip", root_dir=output_dir)
-    assert Path(zip_archive).exists()
-    assert Path(zip_archive).stat().st_size > 0
+    # 9. Call the actual production package_artifacts function
+    zip_archive = package_artifacts(output_dir=output_dir, zip_basename="convoguard_phase2_bert_outputs")
+    assert zip_archive.exists(), "ZIP packaging failed to produce an archive"
+    assert zip_archive.stat().st_size > 0
 
-    # 7. Verify ZIP contents
+    # 10. Verify ZIP contents contain the resulting real output files
     with zipfile.ZipFile(zip_archive, "r") as zf:
         namelist = zf.namelist()
-        assert any("model.pt" in name for name in namelist)
-        assert any("run_config.json" in name for name in namelist)
-        assert any("val_metrics.json" in name for name in namelist)
-        assert any("bert_baselines_validation_metrics.json" in name for name in namelist)
+        assert any("model.pt" in name for name in namelist), "ZIP archive missing model.pt"
+        assert any("config.json" in name for name in namelist), "ZIP archive missing config.json"
+        assert any("tokenizer_config.json" in name for name in namelist), "ZIP archive missing tokenizer_config.json"
+        assert any("run_config.json" in name for name in namelist), "ZIP archive missing run_config.json"
+        assert any("val_metrics.json" in name for name in namelist), "ZIP archive missing val_metrics.json"
+        assert any("bert_baselines_validation_metrics.json" in name for name in namelist), (
+            "ZIP archive missing bert_baselines_validation_metrics.json"
+        )
 
         # Inspect uncorrupted extraction of run_config.json
         run_cfg_name = [n for n in namelist if "run_config.json" in n][0]
