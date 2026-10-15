@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 
 from convoguard.data.forecasting import (
+    assert_forecasting_contract,
     build_dynamic_examples,
     build_static_examples,
     validate_forecasting_conversation,
@@ -245,6 +246,24 @@ def test_validation_fails_on_terminal_label_mismatch(sample_conversations_df: pd
         build_static_examples(df_broken)
 
 
+def test_validation_rejects_non_terminal_attack_turn(sample_conversations_df: pd.DataFrame):
+    # Test positive conversation with an earlier non-terminal attack turn (e.g. index 1)
+    df_early_attack = sample_conversations_df.copy()
+    mask = (df_early_attack["conversation_id"] == "c_derail") & (df_early_attack["utterance_index"] == 1)
+    df_early_attack.loc[mask, "is_comment_attack"] = True
+
+    with pytest.raises(DatasetValidationError, match="attack message\\(s\\) at non-terminal turn"):
+        build_static_examples(df_early_attack)
+
+    # Test negative conversation with an earlier non-terminal attack turn
+    df_neg_early = sample_conversations_df.copy()
+    mask_neg = (df_neg_early["conversation_id"] == "c_clean") & (df_neg_early["utterance_index"] == 1)
+    df_neg_early.loc[mask_neg, "is_comment_attack"] = True
+
+    with pytest.raises(DatasetValidationError, match="attack message\\(s\\) at non-terminal turn"):
+        build_static_examples(df_neg_early)
+
+
 # 5. Deterministic prefix generation
 def test_deterministic_prefix_generation(sample_conversations_df: pd.DataFrame):
     df1 = build_dynamic_examples(sample_conversations_df)
@@ -366,3 +385,29 @@ def test_turn_preserving_truncation_behavior():
     # Verify that all 3 turns still have representation ([SEP] follows each turn)
     sep_count = sum(1 for tid in input_ids if tid == tokenizer.sep_token_id)
     assert sep_count == 3
+
+
+# 10. Structural contract assertions
+def test_assert_forecasting_contract_success(sample_conversations_df: pd.DataFrame):
+    static_df = build_static_examples(sample_conversations_df)
+    dynamic_df = build_dynamic_examples(sample_conversations_df)
+    # Must succeed without error
+    assert_forecasting_contract(sample_conversations_df, static_df, dynamic_df)
+
+
+def test_assert_forecasting_contract_catches_violations(sample_conversations_df: pd.DataFrame):
+    static_df = build_static_examples(sample_conversations_df)
+    dynamic_df = build_dynamic_examples(sample_conversations_df)
+
+    # Violation 1: Tampered static turns (including terminal turn)
+    bad_static = static_df.copy()
+    bad_static.at[0, "turns"] = bad_static.at[0, "turns"] + ["LEAKED TARGET TURN"]
+    with pytest.raises(AssertionError, match="static turns do not match"):
+        assert_forecasting_contract(sample_conversations_df, bad_static, dynamic_df)
+
+    # Violation 2: Tampered dynamic prefix length
+    bad_dynamic = dynamic_df.copy()
+    bad_dynamic.at[0, "prefix_length"] = 999
+    with pytest.raises(AssertionError, match="prefix length mismatch"):
+        assert_forecasting_contract(sample_conversations_df, static_df, bad_dynamic)
+

@@ -83,7 +83,8 @@ def validate_forecasting_conversation(
     3. `total_utterances` column agrees with actual turn count N.
     4. `has_attack` is uniform across all turns.
     5. Terminal turn (`utterance_index == N - 1`) has `is_comment_attack == has_attack`.
-    6. Non-terminal turns in a clean conversation must have `is_comment_attack == False`.
+    6. Non-terminal turns (0 to N-2) must have `is_comment_attack == False` (applies to both
+       positive and negative conversations; attack occurs strictly at terminal target turn).
 
     Returns:
         Sorted pd.DataFrame of conversation turns.
@@ -145,6 +146,17 @@ def validate_forecasting_conversation(
             f"Conversation '{conv_id}' has has_attack={conv_outcome}, but terminal turn "
             f"has is_comment_attack={terminal_comment_attack}. Forecasting target requires "
             f"terminal turn label agreement."
+        )
+
+    # Enforce contract: no non-terminal turn may be an attack (applies to both positive and negative conversations)
+    non_terminal_turns = sorted_group.iloc[:-1]
+    non_terminal_attacks = non_terminal_turns[non_terminal_turns["is_comment_attack"] == True]  # noqa: E712
+    if not non_terminal_attacks.empty:
+        earlier_indices = non_terminal_attacks["utterance_index"].tolist()
+        raise DatasetValidationError(
+            f"Conversation '{conv_id}' has attack message(s) at non-terminal turn(s) {earlier_indices}. "
+            f"Forecasting contract requires all pre-target turns to have is_comment_attack=False "
+            f"(derailment attack must occur exclusively at the terminal target turn)."
         )
 
     return sorted_group
@@ -250,3 +262,85 @@ def build_dynamic_examples(
             records.append(example.to_dict())
 
     return pd.DataFrame(records)
+
+
+def assert_forecasting_contract(
+    raw_df: pd.DataFrame,
+    static_df: pd.DataFrame,
+    dynamic_df: pd.DataFrame,
+) -> None:
+    """Rigorous structural assertion verifying the forecasting contract against raw conversations.
+
+    Verifies:
+    1. Static examples count equals unique conversations count in raw_df.
+    2. For each conversation with N turns, static example turns equal exactly the first N-1 source turns.
+    3. Terminal turn N-1 is never included in static turns.
+    4. For each conversation with N turns, there are exactly N-1 dynamic prefixes (lengths 1 to N-1).
+    5. Each dynamic prefix of length k has turns matching exactly the first k source turns.
+    6. Terminal turn N-1 is never included in any dynamic prefix.
+    7. All static and dynamic examples inherit the validated conversation outcome label.
+    8. Prefix lengths and total conversation turns metadata match actual turn counts.
+
+    Raises:
+        AssertionError: If any structural contract invariant is violated.
+    """
+    raw_conv_groups = {str(cid): grp for cid, grp in raw_df.groupby("conversation_id", sort=False)}
+    static_by_id = {str(row["conversation_id"]): row for _, row in static_df.iterrows()}
+    dynamic_by_id: dict[str, list[dict[str, Any]]] = {}
+    for _, row in dynamic_df.iterrows():
+        cid = str(row["conversation_id"])
+        dynamic_by_id.setdefault(cid, []).append(row.to_dict())
+
+    assert len(static_by_id) == len(raw_conv_groups), (
+        f"Static examples count ({len(static_by_id)}) does not match raw conversation count ({len(raw_conv_groups)})."
+    )
+
+    for conv_id, raw_group in raw_conv_groups.items():
+        sorted_raw = raw_group.sort_values("utterance_index")
+        source_turns = [str(t) for t in sorted_raw["text"].tolist()]
+        n_turns = len(source_turns)
+        expected_label = int(bool(sorted_raw["has_attack"].iloc[0]))
+
+        # --- Static Contract Verification ---
+        assert conv_id in static_by_id, f"Conversation '{conv_id}' missing from static examples."
+        static_ex = static_by_id[conv_id]
+        expected_static_turns = source_turns[:-1]
+
+        assert static_ex["turns"] == expected_static_turns, (
+            f"Conversation '{conv_id}' static turns do not match first N-1 source turns. "
+            f"Expected {len(expected_static_turns)} turns, got {len(static_ex['turns'])}."
+        )
+        assert static_ex["prefix_length"] == n_turns - 1, (
+            f"Conversation '{conv_id}' static prefix_length ({static_ex['prefix_length']}) != N-1 ({n_turns - 1})."
+        )
+        assert static_ex["total_conversation_turns"] == n_turns, (
+            f"Conversation '{conv_id}' static total_turns ({static_ex['total_conversation_turns']}) != N ({n_turns})."
+        )
+        assert static_ex["label"] == expected_label, (
+            f"Conversation '{conv_id}' static label ({static_ex['label']}) != expected ({expected_label})."
+        )
+
+        # --- Dynamic Contract Verification ---
+        assert conv_id in dynamic_by_id, f"Conversation '{conv_id}' missing from dynamic examples."
+        prefixes = sorted(dynamic_by_id[conv_id], key=lambda x: int(x["prefix_length"]))
+        assert len(prefixes) == n_turns - 1, (
+            f"Conversation '{conv_id}' expected {n_turns - 1} dynamic prefixes, got {len(prefixes)}."
+        )
+
+        for k_idx, prefix_ex in enumerate(prefixes, start=1):
+            assert prefix_ex["prefix_length"] == k_idx, (
+                f"Conversation '{conv_id}' prefix length mismatch: {prefix_ex['prefix_length']} != {k_idx}."
+            )
+            expected_prefix_turns = source_turns[:k_idx]
+            assert prefix_ex["turns"] == expected_prefix_turns, (
+                f"Conversation '{conv_id}' prefix {k_idx} turns do not match first {k_idx} source turns."
+            )
+            assert prefix_ex["label"] == expected_label, (
+                f"Conversation '{conv_id}' prefix {k_idx} label ({prefix_ex['label']}) != expected ({expected_label})."
+            )
+            assert prefix_ex["total_conversation_turns"] == n_turns, (
+                f"Conversation '{conv_id}' prefix {k_idx} total_turns != N."
+            )
+            assert prefix_ex["is_full_history"] == (k_idx == n_turns - 1), (
+                f"Conversation '{conv_id}' is_full_history flag incorrect for prefix {k_idx}."
+            )

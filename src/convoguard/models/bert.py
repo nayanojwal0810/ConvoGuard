@@ -26,7 +26,6 @@ import torch.nn as nn
 from transformers import (
     BertConfig,
     BertForSequenceClassification,
-    BertTokenizer,
     PreTrainedTokenizerBase,
 )
 

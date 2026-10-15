@@ -31,6 +31,7 @@ if str(src_dir) not in sys.path:
 
 from convoguard.config import get_config  # noqa: E402
 from convoguard.data.forecasting import (  # noqa: E402
+    assert_forecasting_contract,
     build_dynamic_examples,
     build_static_examples,
 )
@@ -106,6 +107,12 @@ def run_baselines(
         len(dynamic_val),
     )
 
+    # Contract Verification: structural validation against raw data
+    logger.info("Executing rigorous forecasting contract assertions on train and val...")
+    assert_forecasting_contract(df_train, static_train, dynamic_train)
+    assert_forecasting_contract(df_val, static_val, dynamic_val)
+    logger.info("[OK] Forecasting contract structurally verified for both train and val splits.")
+
     results: dict[str, Any] = {
         "metadata": {
             "task": "conversational_derailment_early_forecasting",
@@ -177,7 +184,7 @@ def run_baselines(
         fixed_threshold=0.5,
     )
 
-    # Forecast horizon metrics at threshold 0.5 and validation-selected threshold
+    # Threshold selection using validation full-history conversation predictions only
     opt_th_dynamic = find_optimal_threshold(
         conv_preds["label"].to_numpy(), conv_preds["full_prefix_prob"].to_numpy(), metric="f1"
     )
@@ -193,6 +200,8 @@ def run_baselines(
         "forecast_horizon_evaluation_fixed_th_0.5": horizon_metrics_05,
         "forecast_horizon_evaluation_val_selected_th": {
             "selected_threshold": opt_th_dynamic,
+            "selection_source": "validation_full_history_conversation_predictions",
+            "note": "Optimized on validation data; not an independent estimate of generalization.",
             "metrics": horizon_metrics_opt,
         },
     }
@@ -247,22 +256,35 @@ def main() -> None:
     print(f"                  ROC-AUC: {st_fixed['roc_auc']:.4f} | PR-AUC: {st_fixed['pr_auc']:.4f}")
     print(f"                  Confusion Matrix: {st_fixed['confusion_matrix']}")
     print(f"   [Val-Tuned th={st_opt['selected_threshold']:.4f}] Acc: {st_opt['metrics']['accuracy']:.4f} | Pos-F1: {st_opt['metrics']['f1']:.4f} | Macro-F1: {st_opt['metrics']['macro_f1']:.4f}")
+    print("                  (Note: Threshold optimized on validation; diagnostic only)")
 
     # Print Dynamic TF-IDF
     dyn_full = results["baselines"]["dynamic_tfidf_lr"]["conversation_level_full_prefix_evaluation"]["fixed_threshold_0.5"]
     dyn_max = results["baselines"]["dynamic_tfidf_lr"]["conversation_level_max_pooling_evaluation"]["fixed_threshold_0.5"]
-    fh = results["baselines"]["dynamic_tfidf_lr"]["forecast_horizon_evaluation_fixed_th_0.5"]
+    fh_05 = results["baselines"]["dynamic_tfidf_lr"]["forecast_horizon_evaluation_fixed_th_0.5"]
+    fh_opt_data = results["baselines"]["dynamic_tfidf_lr"]["forecast_horizon_evaluation_val_selected_th"]
+    opt_th = fh_opt_data["selected_threshold"]
+    fh_opt = fh_opt_data["metrics"]
 
     print("\n3. Dynamic TF-IDF + Logistic Regression (Prefix Trained):")
     print(f"   [Full-Prefix th=0.5] Acc: {dyn_full['accuracy']:.4f} | Pos-F1: {dyn_full['f1']:.4f} | Macro-F1: {dyn_full['macro_f1']:.4f}")
     print(f"                        ROC-AUC: {dyn_full['roc_auc']:.4f} | PR-AUC: {dyn_full['pr_auc']:.4f}")
     print(f"   [Max-Pooling th=0.5] Acc: {dyn_max['accuracy']:.4f} | Pos-F1: {dyn_max['f1']:.4f} | Macro-F1: {dyn_max['macro_f1']:.4f}")
-    print("\n4. Forecast-Horizon Analysis (Dynamic TF-IDF at th=0.5):")
-    print(f"   Mean Horizon: {fh['mean_horizon']:.2f} turns | Median: {fh['median_horizon']:.1f} turns (range: {fh['min_horizon']}-{fh['max_horizon']})")
-    print(f"   Positives Alerted: {fh['alerted_positive_conversations']}/{fh['positive_conversations_total']} ({fh['recall_at_conversation_level']*100:.1f}%)")
-    print(f"   Warned Before Terminal Prefix (H > 1): {fh['warned_before_latest_prefix_count']}/{fh['positive_conversations_total']} ({fh['warned_before_latest_prefix_proportion']*100:.1f}%)")
-    print(f"   Negative Conversation False-Alert Rate: {fh['false_alert_conversations_count']}/{fh['negative_conversations_total']} ({fh['false_alert_rate']*100:.1f}%)")
-    print(f"   Horizon Distribution (turns ahead -> count): {fh['horizon_distribution']}")
+
+    print("\n4. Forecast-Horizon Analysis at Fixed Decision Threshold (th=0.5):")
+    print(f"   Mean Horizon: {fh_05['mean_horizon']:.2f} turns | Median: {fh_05['median_horizon']:.1f} turns (range: {fh_05['min_horizon']}-{fh_05['max_horizon']})")
+    print(f"   Positive Alert Coverage: {fh_05['alerted_positive_conversations']}/{fh_05['positive_conversations_total']} ({fh_05['recall_at_conversation_level']*100:.1f}%)")
+    print(f"   Warned Before Terminal Prefix (H > 1): {fh_05['warned_before_latest_prefix_count']}/{fh_05['positive_conversations_total']} ({fh_05['warned_before_latest_prefix_proportion']*100:.1f}%)")
+    print(f"   Negative Conversation False-Alert Rate: {fh_05['false_alert_conversations_count']}/{fh_05['negative_conversations_total']} ({fh_05['false_alert_rate']*100:.1f}%)")
+    print(f"   Horizon Distribution (turns ahead -> count): {fh_05['horizon_distribution']}")
+
+    print(f"\n5. Forecast-Horizon Analysis at Validation-Selected Threshold (th={opt_th:.4f}):")
+    print("   [NOTE: Threshold optimized on validation full-history conversation predictions. Validation diagnostic only, not an independent generalization estimate.]")
+    print(f"   Mean Horizon: {fh_opt['mean_horizon']:.2f} turns | Median: {fh_opt['median_horizon']:.1f} turns (range: {fh_opt['min_horizon']}-{fh_opt['max_horizon']})")
+    print(f"   Positive Alert Coverage: {fh_opt['alerted_positive_conversations']}/{fh_opt['positive_conversations_total']} ({fh_opt['recall_at_conversation_level']*100:.1f}%)")
+    print(f"   Warned Before Terminal Prefix (H > 1): {fh_opt['warned_before_latest_prefix_count']}/{fh_opt['positive_conversations_total']} ({fh_opt['warned_before_latest_prefix_proportion']*100:.1f}%)")
+    print(f"   Negative Conversation False-Alert Rate: {fh_opt['false_alert_conversations_count']}/{fh_opt['negative_conversations_total']} ({fh_opt['false_alert_rate']*100:.1f}%)")
+    print(f"   Horizon Distribution (turns ahead -> count): {fh_opt['horizon_distribution']}")
     print("=" * 70)
 
 

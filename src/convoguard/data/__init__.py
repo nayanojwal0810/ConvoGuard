@@ -4,6 +4,7 @@ from convoguard.data.audit import DatasetAuditor, audit_dataset
 from convoguard.data.forecasting import (
     DynamicExample,
     StaticExample,
+    assert_forecasting_contract,
     build_dynamic_examples,
     build_static_examples,
     validate_forecasting_conversation,
@@ -39,4 +40,5 @@ __all__ = [
     "validate_forecasting_conversation",
     "build_static_examples",
     "build_dynamic_examples",
+    "assert_forecasting_contract",
 ]
