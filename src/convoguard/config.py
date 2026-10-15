@@ -58,3 +58,34 @@ class ProjectConfig(BaseModel):
 def get_config() -> ProjectConfig:
     """Instantiate and return the project configuration."""
     return ProjectConfig()
+
+
+def _make_json_safe(val: object) -> object:
+    """Recursively convert values (Paths, numpy scalars, collections) to standard JSON types."""
+    if isinstance(val, Path):
+        return str(val.as_posix())
+    if isinstance(val, (int, float, str, bool)) or val is None:
+        return val
+    if hasattr(val, "item") and callable(val.item):
+        return val.item()
+    if hasattr(val, "tolist") and callable(val.tolist):
+        return val.tolist()
+    if isinstance(val, dict):
+        return {str(k): _make_json_safe(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple, set)):
+        return [_make_json_safe(item) for item in val]
+    return str(val)
+
+
+def serialize_run_config(config_dict: dict[str, object]) -> dict[str, object]:
+    """Recursively convert a configuration dictionary to a strictly JSON-serializable dict.
+
+    Converts:
+    - Path instances to posix strings
+    - Numpy scalars and collections to standard Python primitives
+    - Nested dictionaries, lists, and tuples recursively
+    """
+    safe_config: dict[str, object] = {}
+    for key, value in config_dict.items():
+        safe_config[str(key)] = _make_json_safe(value)
+    return safe_config

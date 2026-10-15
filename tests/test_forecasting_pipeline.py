@@ -14,10 +14,14 @@ Tests all Task G requirements using small synthetic fixtures:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from convoguard.config import serialize_run_config
 from convoguard.data.forecasting import (
     assert_forecasting_contract,
     build_dynamic_examples,
@@ -30,6 +34,8 @@ from convoguard.models.bert import turn_preserving_truncate
 from convoguard.models.evaluation import (
     aggregate_dynamic_predictions,
     compute_forecast_horizon_metrics,
+    evaluate_predictions,
+    find_optimal_threshold,
 )
 
 
@@ -410,4 +416,75 @@ def test_assert_forecasting_contract_catches_violations(sample_conversations_df:
     bad_dynamic.at[0, "prefix_length"] = 999
     with pytest.raises(AssertionError, match="prefix length mismatch"):
         assert_forecasting_contract(sample_conversations_df, static_df, bad_dynamic)
+
+
+# 11. Defensible Macro-F1 threshold selection regression test
+def test_macro_f1_threshold_selection_avoids_all_positive_collapse():
+    # Construct a dataset where an all-positive classifier yields high positive F1 (0.667)
+    # but a balanced threshold achieves substantially superior Macro-F1 (0.792).
+    # 5 negatives, 5 positives
+    y_true = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
+    y_prob = np.array([0.10, 0.20, 0.30, 0.40, 0.45, 0.25, 0.35, 0.55, 0.65, 0.75])
+
+    # All-positive threshold (e.g. 0.05) predicts all 1s
+    all_pos_preds = (y_prob >= 0.05).astype(int)
+    assert all_pos_preds.sum() == 10
+    from sklearn.metrics import f1_score
+    macro_all_pos = f1_score(y_true, all_pos_preds, average="macro", zero_division=0)
+    assert np.isclose(macro_all_pos, 0.333333, atol=1e-3)
+
+    # Macro-F1 selection must pick a balanced threshold and NOT reproduce all-positive classifier
+    opt_th_macro = find_optimal_threshold(y_true, y_prob, metric="macro_f1")
+    assert opt_th_macro > 0.40, f"Expected balanced threshold > 0.40, got {opt_th_macro}"
+
+    preds_opt = (y_prob >= opt_th_macro).astype(int)
+    # Must not predict all positives
+    assert preds_opt.sum() < 10, "Threshold selection reproduced an all-positive classifier!"
+    # Must have non-zero true negatives
+    assert ((preds_opt == 0) & (y_true == 0)).sum() > 0
+
+    macro_opt = f1_score(y_true, preds_opt, average="macro", zero_division=0)
+    assert macro_opt > macro_all_pos, f"Macro-F1 {macro_opt} should exceed all-positive Macro-F1 {macro_all_pos}"
+
+    # Verify evaluate_predictions records the correct criterion
+    eval_res = evaluate_predictions(y_true, y_prob, fixed_threshold=0.5, optimal_metric="macro_f1")
+    assert eval_res["validation_selected_threshold"]["selection_criterion"] == "max_macro_f1_on_validation"
+    assert "positive_alert_coverage" in eval_res["fixed_threshold_0.5"]
+    assert "negative_false_alert_rate" in eval_res["fixed_threshold_0.5"]
+    assert "positive_alert_coverage" in eval_res["validation_selected_threshold"]["metrics"]
+    assert "negative_false_alert_rate" in eval_res["validation_selected_threshold"]["metrics"]
+
+
+# 12. Run configuration serialization regression test
+def test_serialize_run_config_with_path_objects():
+    raw_config = {
+        "model_name": "bert-base-uncased",
+        "output_dir": Path("outputs_bert_baselines"),
+        "checkpoints_dir": Path("outputs_bert_baselines/checkpoints"),
+        "epochs": 3,
+        "learning_rate": 2e-5,
+        "seed": 42,
+        "nested": {
+            "sub_path": Path("artifacts/metrics.json"),
+            "numpy_val": np.int64(10),
+            "numpy_float": np.float64(0.5),
+        },
+        "path_list": [Path("dir1"), Path("dir2")],
+    }
+
+    # Direct json.dumps must raise TypeError because of Path objects
+    with pytest.raises(TypeError, match="is not JSON serializable"):
+        json.dumps(raw_config)
+
+    # serialize_run_config must convert Paths and numpy objects to JSON-serializable primitives
+    serialized = serialize_run_config(raw_config)
+    json_str = json.dumps(serialized, indent=2)
+    assert isinstance(json_str, str)
+
+    loaded = json.loads(json_str)
+    assert isinstance(loaded["output_dir"], str)
+    assert "outputs_bert_baselines" in loaded["output_dir"]
+    assert loaded["nested"]["numpy_val"] == 10
+    assert loaded["nested"]["numpy_float"] == 0.5
+    assert isinstance(loaded["path_list"][0], str)
 

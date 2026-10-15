@@ -66,11 +66,17 @@ def compute_binary_metrics(
     cm = confusion_matrix(y_true_arr, y_pred, labels=[0, 1])
     tn, fp, fn, tp = int(cm[0, 0]), int(cm[0, 1]), int(cm[1, 0]), int(cm[1, 1])
 
+    pos_coverage = float(rec)
+    neg_total = tn + fp
+    neg_false_alert_rate = float(fp / neg_total) if neg_total > 0 else 0.0
+
     return {
         "threshold": round(float(threshold), 4),
         "accuracy": round(acc, 6),
         "precision": round(prec, 6),
         "recall": round(rec, 6),
+        "positive_alert_coverage": round(pos_coverage, 6),
+        "negative_false_alert_rate": round(neg_false_alert_rate, 6),
         "f1": round(f1, 6),
         "macro_f1": round(macro_f1, 6),
         "roc_auc": round(roc_auc, 6) if not np.isnan(roc_auc) else None,
@@ -83,7 +89,7 @@ def compute_binary_metrics(
 def find_optimal_threshold(
     y_true: np.ndarray | list[int],
     y_prob: np.ndarray | list[float],
-    metric: str = "f1",
+    metric: str = "macro_f1",
     num_candidates: int = 181,
 ) -> float:
     """Find the probability threshold that maximizes a target metric on validation data.
@@ -91,7 +97,7 @@ def find_optimal_threshold(
     Args:
         y_true: Validation ground truth binary labels.
         y_prob: Validation predicted probabilities.
-        metric: Metric to optimize ('f1' or 'macro_f1').
+        metric: Metric to optimize ('macro_f1' [default/primary] or 'f1' [positive-class F1]).
         num_candidates: Number of candidate thresholds between 0.05 and 0.95.
 
     Returns:
@@ -107,11 +113,14 @@ def find_optimal_threshold(
     for th in thresholds:
         y_pred = (y_prob_arr >= th).astype(int)
         if metric == "macro_f1":
-            score = f1_score(y_true_arr, y_pred, average="macro", zero_division=0)
+            score = float(f1_score(y_true_arr, y_pred, average="macro", zero_division=0))
+        elif metric == "f1":
+            score = float(f1_score(y_true_arr, y_pred, zero_division=0))
         else:
-            score = f1_score(y_true_arr, y_pred, zero_division=0)
+            raise ValueError(f"Unsupported metric for threshold search: '{metric}'. Use 'macro_f1' or 'f1'.")
 
-        if score > best_score:
+        # Select highest score; tie-break towards 0.5 for numerical stability
+        if score > best_score or (np.isclose(score, best_score) and abs(th - 0.5) < abs(best_th - 0.5)):
             best_score = score
             best_th = float(th)
 
@@ -123,22 +132,50 @@ def evaluate_predictions(
     y_prob: np.ndarray | list[float],
     fixed_threshold: float = 0.5,
     select_optimal: bool = True,
+    optimal_metric: str = "macro_f1",
+    include_positive_f1_diagnostic: bool = True,
 ) -> dict[str, Any]:
-    """Compute metrics at default fixed threshold and optionally at validation-selected threshold."""
+    """Compute metrics at default fixed threshold and at validation-selected threshold(s).
+
+    Args:
+        y_true: Ground truth binary labels.
+        y_prob: Predicted probabilities.
+        fixed_threshold: Fixed threshold (0.5 preserved as standard baseline).
+        select_optimal: Whether to find and evaluate an optimal threshold on validation data.
+        optimal_metric: Primary criterion for threshold selection (default 'macro_f1').
+        include_positive_f1_diagnostic: Whether to also include positive-F1 tuning as a
+            separately labelled recall-heavy diagnostic.
+
+    Returns:
+        Structured evaluation metrics dictionary.
+    """
     fixed_metrics = compute_binary_metrics(y_true, y_prob, threshold=fixed_threshold)
     result: dict[str, Any] = {
         "fixed_threshold_0.5": fixed_metrics,
     }
 
     if select_optimal:
-        opt_th = find_optimal_threshold(y_true, y_prob, metric="f1")
+        opt_th = find_optimal_threshold(y_true, y_prob, metric=optimal_metric)
         opt_metrics = compute_binary_metrics(y_true, y_prob, threshold=opt_th)
         result["validation_selected_threshold"] = {
             "selected_threshold": opt_th,
-            "selection_criterion": "max_f1_on_validation",
+            "selection_criterion": f"max_{optimal_metric}_on_validation",
             "note": "Optimized on validation data; not an independent estimate of generalization.",
             "metrics": opt_metrics,
         }
+
+        if include_positive_f1_diagnostic and optimal_metric != "f1":
+            opt_th_f1 = find_optimal_threshold(y_true, y_prob, metric="f1")
+            opt_metrics_f1 = compute_binary_metrics(y_true, y_prob, threshold=opt_th_f1)
+            result["validation_selected_threshold_positive_f1_diagnostic"] = {
+                "selected_threshold": opt_th_f1,
+                "selection_criterion": "max_positive_f1_on_validation",
+                "note": (
+                    "Recall-heavy diagnostic optimized for positive-class F1 on validation; "
+                    "not an independent estimate of generalization."
+                ),
+                "metrics": opt_metrics_f1,
+            }
 
     return result
 

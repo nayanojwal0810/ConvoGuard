@@ -185,11 +185,22 @@ def run_baselines(
     )
 
     # Threshold selection using validation full-history conversation predictions only
-    opt_th_dynamic = find_optimal_threshold(
-        conv_preds["label"].to_numpy(), conv_preds["full_prefix_prob"].to_numpy(), metric="f1"
+    # Primary: Macro-F1 optimization
+    opt_th_dynamic_macro = find_optimal_threshold(
+        conv_preds["label"].to_numpy(), conv_preds["full_prefix_prob"].to_numpy(), metric="macro_f1"
     )
     horizon_metrics_05 = compute_forecast_horizon_metrics(dynamic_val, dynamic_val_probs, threshold=0.5)
-    horizon_metrics_opt = compute_forecast_horizon_metrics(dynamic_val, dynamic_val_probs, threshold=opt_th_dynamic)
+    horizon_metrics_macro = compute_forecast_horizon_metrics(
+        dynamic_val, dynamic_val_probs, threshold=opt_th_dynamic_macro
+    )
+
+    # Secondary diagnostic: Positive-F1 optimization (recall-heavy diagnostic)
+    opt_th_dynamic_f1 = find_optimal_threshold(
+        conv_preds["label"].to_numpy(), conv_preds["full_prefix_prob"].to_numpy(), metric="f1"
+    )
+    horizon_metrics_f1 = compute_forecast_horizon_metrics(
+        dynamic_val, dynamic_val_probs, threshold=opt_th_dynamic_f1
+    )
 
     results["baselines"]["dynamic_tfidf_lr"] = {
         "model_type": "word_and_char_tfidf_logistic_regression",
@@ -199,10 +210,18 @@ def run_baselines(
         "conversation_level_max_pooling_evaluation": max_pooling_eval,
         "forecast_horizon_evaluation_fixed_th_0.5": horizon_metrics_05,
         "forecast_horizon_evaluation_val_selected_th": {
-            "selected_threshold": opt_th_dynamic,
+            "selected_threshold": opt_th_dynamic_macro,
+            "selection_criterion": "max_macro_f1_on_validation_full_history",
             "selection_source": "validation_full_history_conversation_predictions",
             "note": "Optimized on validation data; not an independent estimate of generalization.",
-            "metrics": horizon_metrics_opt,
+            "metrics": horizon_metrics_macro,
+        },
+        "forecast_horizon_evaluation_positive_f1_diagnostic": {
+            "selected_threshold": opt_th_dynamic_f1,
+            "selection_criterion": "max_positive_f1_on_validation_full_history",
+            "selection_source": "validation_full_history_conversation_predictions",
+            "note": "Recall-heavy diagnostic optimized for positive-class F1 on validation; not an independent estimate of generalization.",
+            "metrics": horizon_metrics_f1,
         },
     }
 
@@ -246,17 +265,25 @@ def main() -> None:
     cp = results["baselines"]["class_prior"]["validation_metrics"]
     print("\n1. Class-Prior Baseline (th=0.5):")
     print(f"   Accuracy: {cp['accuracy']:.4f} | Macro-F1: {cp['macro_f1']:.4f} | Pos-F1: {cp['f1']:.4f}")
+    print(f"   Positive Alert Coverage: {cp['positive_alert_coverage']*100:.1f}% | Negative False-Alert Rate: {cp['negative_false_alert_rate']*100:.1f}%")
     print(f"   Confusion Matrix: {cp['confusion_matrix']}")
 
     # Print Static TF-IDF
     st_fixed = results["baselines"]["static_tfidf_lr"]["evaluation"]["fixed_threshold_0.5"]
     st_opt = results["baselines"]["static_tfidf_lr"]["evaluation"]["validation_selected_threshold"]
+    st_diag = results["baselines"]["static_tfidf_lr"]["evaluation"].get("validation_selected_threshold_positive_f1_diagnostic")
     print("\n2. Static TF-IDF + Logistic Regression (Full Pre-Target History):")
     print(f"   [Fixed th=0.5] Acc: {st_fixed['accuracy']:.4f} | Pos-F1: {st_fixed['f1']:.4f} | Macro-F1: {st_fixed['macro_f1']:.4f}")
     print(f"                  ROC-AUC: {st_fixed['roc_auc']:.4f} | PR-AUC: {st_fixed['pr_auc']:.4f}")
+    print(f"                  Positive Alert Coverage: {st_fixed['positive_alert_coverage']*100:.1f}% | Negative False-Alert Rate: {st_fixed['negative_false_alert_rate']*100:.1f}%")
     print(f"                  Confusion Matrix: {st_fixed['confusion_matrix']}")
-    print(f"   [Val-Tuned th={st_opt['selected_threshold']:.4f}] Acc: {st_opt['metrics']['accuracy']:.4f} | Pos-F1: {st_opt['metrics']['f1']:.4f} | Macro-F1: {st_opt['metrics']['macro_f1']:.4f}")
-    print("                  (Note: Threshold optimized on validation; diagnostic only)")
+    print(f"   [Val-Tuned Macro-F1 th={st_opt['selected_threshold']:.4f}] Acc: {st_opt['metrics']['accuracy']:.4f} | Pos-F1: {st_opt['metrics']['f1']:.4f} | Macro-F1: {st_opt['metrics']['macro_f1']:.4f}")
+    print(f"                  Positive Alert Coverage: {st_opt['metrics']['positive_alert_coverage']*100:.1f}% | Negative False-Alert Rate: {st_opt['metrics']['negative_false_alert_rate']*100:.1f}%")
+    print("                  (Note: Threshold optimized on validation Macro-F1; diagnostic only, not an independent generalization estimate)")
+    if st_diag:
+        print(f"   [Val-Tuned Pos-F1 Diagnostic th={st_diag['selected_threshold']:.4f}] Acc: {st_diag['metrics']['accuracy']:.4f} | Pos-F1: {st_diag['metrics']['f1']:.4f} | Macro-F1: {st_diag['metrics']['macro_f1']:.4f}")
+        print(f"                  Positive Alert Coverage: {st_diag['metrics']['positive_alert_coverage']*100:.1f}% | Negative False-Alert Rate: {st_diag['metrics']['negative_false_alert_rate']*100:.1f}%")
+        print("                  (Note: Recall-heavy diagnostic optimized for positive-class F1 on validation)")
 
     # Print Dynamic TF-IDF
     dyn_full = results["baselines"]["dynamic_tfidf_lr"]["conversation_level_full_prefix_evaluation"]["fixed_threshold_0.5"]
@@ -265,11 +292,14 @@ def main() -> None:
     fh_opt_data = results["baselines"]["dynamic_tfidf_lr"]["forecast_horizon_evaluation_val_selected_th"]
     opt_th = fh_opt_data["selected_threshold"]
     fh_opt = fh_opt_data["metrics"]
+    fh_diag_data = results["baselines"]["dynamic_tfidf_lr"].get("forecast_horizon_evaluation_positive_f1_diagnostic")
 
     print("\n3. Dynamic TF-IDF + Logistic Regression (Prefix Trained):")
     print(f"   [Full-Prefix th=0.5] Acc: {dyn_full['accuracy']:.4f} | Pos-F1: {dyn_full['f1']:.4f} | Macro-F1: {dyn_full['macro_f1']:.4f}")
     print(f"                        ROC-AUC: {dyn_full['roc_auc']:.4f} | PR-AUC: {dyn_full['pr_auc']:.4f}")
+    print(f"                        Positive Alert Coverage: {dyn_full['positive_alert_coverage']*100:.1f}% | Negative False-Alert Rate: {dyn_full['negative_false_alert_rate']*100:.1f}%")
     print(f"   [Max-Pooling th=0.5] Acc: {dyn_max['accuracy']:.4f} | Pos-F1: {dyn_max['f1']:.4f} | Macro-F1: {dyn_max['macro_f1']:.4f}")
+    print(f"                        Positive Alert Coverage: {dyn_max['positive_alert_coverage']*100:.1f}% | Negative False-Alert Rate: {dyn_max['negative_false_alert_rate']*100:.1f}%")
 
     print("\n4. Forecast-Horizon Analysis at Fixed Decision Threshold (th=0.5):")
     print(f"   Mean Horizon: {fh_05['mean_horizon']:.2f} turns | Median: {fh_05['median_horizon']:.1f} turns (range: {fh_05['min_horizon']}-{fh_05['max_horizon']})")
@@ -278,13 +308,25 @@ def main() -> None:
     print(f"   Negative Conversation False-Alert Rate: {fh_05['false_alert_conversations_count']}/{fh_05['negative_conversations_total']} ({fh_05['false_alert_rate']*100:.1f}%)")
     print(f"   Horizon Distribution (turns ahead -> count): {fh_05['horizon_distribution']}")
 
-    print(f"\n5. Forecast-Horizon Analysis at Validation-Selected Threshold (th={opt_th:.4f}):")
-    print("   [NOTE: Threshold optimized on validation full-history conversation predictions. Validation diagnostic only, not an independent generalization estimate.]")
+    print(f"\n5. Forecast-Horizon Analysis at Validation-Selected Macro-F1 Threshold (th={opt_th:.4f}):")
+    print("   [NOTE: Primary criterion is max Macro-F1 on validation full-history conversation predictions. Validation diagnostic only, not an independent generalization estimate.]")
     print(f"   Mean Horizon: {fh_opt['mean_horizon']:.2f} turns | Median: {fh_opt['median_horizon']:.1f} turns (range: {fh_opt['min_horizon']}-{fh_opt['max_horizon']})")
     print(f"   Positive Alert Coverage: {fh_opt['alerted_positive_conversations']}/{fh_opt['positive_conversations_total']} ({fh_opt['recall_at_conversation_level']*100:.1f}%)")
     print(f"   Warned Before Terminal Prefix (H > 1): {fh_opt['warned_before_latest_prefix_count']}/{fh_opt['positive_conversations_total']} ({fh_opt['warned_before_latest_prefix_proportion']*100:.1f}%)")
     print(f"   Negative Conversation False-Alert Rate: {fh_opt['false_alert_conversations_count']}/{fh_opt['negative_conversations_total']} ({fh_opt['false_alert_rate']*100:.1f}%)")
     print(f"   Horizon Distribution (turns ahead -> count): {fh_opt['horizon_distribution']}")
+
+    if fh_diag_data:
+        diag_th = fh_diag_data["selected_threshold"]
+        fh_diag = fh_diag_data["metrics"]
+        print(f"\n6. (Diagnostic) Forecast-Horizon Analysis at Validation-Selected Positive-F1 Threshold (th={diag_th:.4f}):")
+        print("   [NOTE: Recall-heavy diagnostic optimizing positive-class F1 on validation full-history. Not an independent generalization estimate.]")
+        print(f"   Mean Horizon: {fh_diag['mean_horizon']:.2f} turns | Median: {fh_diag['median_horizon']:.1f} turns (range: {fh_diag['min_horizon']}-{fh_diag['max_horizon']})")
+        print(f"   Positive Alert Coverage: {fh_diag['alerted_positive_conversations']}/{fh_diag['positive_conversations_total']} ({fh_diag['recall_at_conversation_level']*100:.1f}%)")
+        print(f"   Warned Before Terminal Prefix (H > 1): {fh_diag['warned_before_latest_prefix_count']}/{fh_diag['positive_conversations_total']} ({fh_diag['warned_before_latest_prefix_proportion']*100:.1f}%)")
+        print(f"   Negative Conversation False-Alert Rate: {fh_diag['false_alert_conversations_count']}/{fh_diag['negative_conversations_total']} ({fh_diag['false_alert_rate']*100:.1f}%)")
+        print(f"   Horizon Distribution (turns ahead -> count): {fh_diag['horizon_distribution']}")
+
     print("=" * 70)
 
 
