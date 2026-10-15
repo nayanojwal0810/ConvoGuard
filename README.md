@@ -2,122 +2,100 @@
 
 Conversation Guardian: early forecasting of personal attacks in Wikipedia Talk-page discussions.
 
-This repository is being initialized for a fresh, evidence-driven implementation. The implementation plan, evaluation protocol, trained-model artifacts, NoSQL benchmark outputs, and application will be added in controlled milestones. No prior implementation or reported metric is assumed valid until reproduced.
+This repository contains a clean, evidence-driven implementation. Previous code and unverified metrics are not treated as valid baselines unless they are reproduced.
 
 ## Project goals
 
 - Forecast future discussion derailment from only the observed conversation prefix.
-- Compare published baselines and a proposed interaction-aware model.
+- Compare published baselines and an interaction-aware model.
 - Evaluate MongoDB data layouts and Redis cache policies on measured workloads.
 - Deliver one integrated Streamlit application and separate Sequential Modeling and NoSQL reports.
 
-## Status
+## Current status
 
-Phase 1 & Phase 2 completed:
-- **Phase 1 (Clean Foundation & Verification):** Reusable dataset loader, strict schema verification, SHA-256 cryptographic provenance, and automated testing operational.
-- **Phase 2 (Forecasting Dataset & Baselines):**
-  - Contract validation locking pre-target observation histories (strictly excluding terminal target comments).
-  - Static (full history) and dynamic (prefix sequences) dataset generators.
-  - CPU Baselines evaluated on validation split: Class-Prior, Static Word+Char TF-IDF + Logistic Regression, Dynamic TF-IDF + Logistic Regression.
-  - Published BERT-SC and BERT-SC+ models implemented with turn-preserving recursive truncation (Kementchedjhieva & Søgaard, EMNLP 2021).
-  - Forecast-horizon evaluation framework quantifying early warnings and false alert rates.
-  - Kaggle GPU training notebook and execution guide prepared under `experiments/kaggle/`.
-  - The official test split was strictly untouched and excluded from all evaluations.
+- **Phase 1 — Data foundation: complete.** Dataset loading, schema/label contract checks, audit tooling, and synthetic-fixture tests are in place.
+- **Phase 2 — Forecasting pipeline and CPU baselines: implemented.** Static and dynamic pre-target examples, word/character TF-IDF baselines, threshold selection, and forecast-horizon calculations have been run on training and validation data.
+- **BERT-SC and BERT-SC+ experiment: prepared, GPU execution pending.** The published methods have been implemented and a Kaggle notebook is available, but no successful GPU training run or BERT validation result has been demonstrated yet. Do not interpret this repository as having validated BERT performance.
+- **Later phases: not started.** Graph modeling, NoSQL benchmarks, the integrated Streamlit application, public deployment, and subject reports remain pending.
 
-## Project Structure
+### Evaluation integrity note
+
+The current clean baseline script and Kaggle notebook are designed to load training and validation data only; they must not load the test split during model development. Test metrics were examined in an earlier project iteration, however, so the test split cannot honestly be described as never viewed across the full project history. Do not use it for further model selection, threshold tuning, or experimentation; disclose this historical exposure in any final evaluation.
+
+## Project structure
 
 ```
 ConvoGuard/
 ├── src/
 │   └── convoguard/
-│       ├── __init__.py
 │       ├── config.py
 │       ├── data/
-│       │   ├── __init__.py
 │       │   ├── loader.py
 │       │   ├── audit.py
-│       │   └── forecasting.py       # Pre-target static & dynamic example builders
+│       │   └── forecasting.py
 │       └── models/
 │           ├── __init__.py
-│           ├── baselines.py          # Class-prior, Static & Dynamic TF-IDF + LR
-│           ├── bert.py               # Published BERT-SC & BERT-SC+ architectures
-│           └── evaluation.py         # Metrics, threshold tuning, and forecast-horizon
+│           ├── artifacts.py           # Checkpoint persistence and ZIP packaging
+│           ├── baselines.py           # Class-prior and TF-IDF baselines
+│           ├── bert.py                # Published BERT-SC and BERT-SC+ architectures
+│           └── evaluation.py           # Classification and forecast-horizon metrics
 ├── scripts/
-│   ├── audit_dataset.py              # Provenance and integrity audit CLI
-│   └── run_cpu_baselines.py          # CPU baselines execution on train/val
+│   ├── audit_dataset.py
+│   └── run_cpu_baselines.py
 ├── tests/
-│   ├── test_data_pipeline.py         # 14 data integrity tests
-│   └── test_forecasting_pipeline.py  # 11 forecasting & horizon tests
+│   ├── test_data_pipeline.py
+│   └── test_forecasting_pipeline.py
 ├── experiments/
 │   ├── kaggle/
-│   │   ├── 02_bert_forecasting_baselines.ipynb  # Self-contained Kaggle GPU notebook
-│   │   └── README.md                            # Beginner-friendly Kaggle guide
+│   │   ├── 02_bert_forecasting_baselines.ipynb
+│   │   └── README.md
 │   └── colab/
 ├── artifacts/
-│   ├── data_audit/
-│   └── benchmarks/
 ├── .env.example
 ├── .gitignore
 ├── pyproject.toml
 └── README.md
 ```
 
-## Setup and Installation
+## Setup and installation
 
-### 1. Environment Installation
-Install the package in editable mode with development dependencies:
+Create and activate a Python environment, then install the project and development tools:
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-For GPU/transformer training dependencies:
+The CPU baselines and evaluation utilities do not require PyTorch or Transformers. BERT model functionality uses the optional `bert` dependency group:
 
 ```bash
 pip install -e ".[dev,bert]"
 ```
 
-### 2. Dataset Configuration
-Configure your local dataset root in `.env` or point directly via CLI arguments:
+## Dataset configuration
 
-```bash
-cp .env.example .env
-```
+Point `DATA_ROOT` to a directory containing the train, validation, and test Parquet files. Keep dataset files local; they are excluded from Git. For model development, the baseline runner and BERT notebook should load only the train and validation files.
 
-Ensure `DATA_ROOT` points to the directory containing `train_conversations.parquet`, `val_conversations.parquet`, and `test_conversations.parquet`.
-
-## Running the CPU Baselines
-
-Run the class-prior, static TF-IDF, and dynamic TF-IDF baselines on train and validation data:
+## Run CPU baselines
 
 ```bash
 python scripts/run_cpu_baselines.py --data-root "data/raw" --output "artifacts/benchmarks/cpu_baselines_metrics.json"
 ```
 
-Evaluated models:
-1. **Class-Prior Baseline:** Majority / empirical training class rate.
-2. **Static TF-IDF + Logistic Regression:** Word (1-2) and Char (3-5) n-grams on complete pre-target history.
-3. **Dynamic TF-IDF + Logistic Regression:** Word and Char n-grams on successive prefix sequences.
-4. **Forecast-Horizon Analysis:** Measures turns ahead ($H = N - k$) at which positive conversations are alerted.
+This fits the class-prior, static word-plus-character TF-IDF, and dynamic-prefix TF-IDF baselines on training data and reports validation classification and forecast-horizon diagnostics. Outputs are written locally under `artifacts/benchmarks/` and excluded from Git.
 
-Outputs are saved locally to `artifacts/benchmarks/` and excluded from git tracking.
+## Run the BERT experiment
 
-## Kaggle GPU Training for BERT-SC Baselines
+Follow `experiments/kaggle/README.md` and open `experiments/kaggle/02_bert_forecasting_baselines.ipynb` in Kaggle. Attach the CGA-Wiki dataset, enable a GPU accelerator and internet access, and run the notebook. The experiment is not complete until BERT-SC and BERT-SC+ both finish, validation results are saved, and the generated ZIP is inspected. Do not load the test split.
 
-Follow the step-by-step instructions in [`experiments/kaggle/README.md`](experiments/kaggle/README.md):
-- Open `experiments/kaggle/02_bert_forecasting_baselines.ipynb` in Kaggle.
-- Attach the CGA-Wiki dataset and enable a GPU accelerator (P100 or T4 x 2) with internet access.
-- Trains both **BERT-SC** (static) and **BERT-SC+** (dynamic) with validation checkpointing and packages results into a downloadable ZIP archive.
+## Tests and linting
 
-## Testing and Linting
-
-Run the complete test suite (25 automated tests):
+Run the tests:
 
 ```bash
 python -m pytest -v
 ```
 
-Run code quality and style linting:
+Run Ruff:
 
 ```bash
 python -m ruff check .
