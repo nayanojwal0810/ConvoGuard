@@ -15,11 +15,14 @@ Tests all Task G requirements using small synthetic fixtures:
 from __future__ import annotations
 
 import json
+import shutil
+import zipfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from convoguard.config import serialize_run_config
 from convoguard.data.forecasting import (
@@ -487,4 +490,79 @@ def test_serialize_run_config_with_path_objects():
     assert loaded["nested"]["numpy_val"] == 10
     assert loaded["nested"]["numpy_float"] == 0.5
     assert isinstance(loaded["path_list"][0], str)
+
+
+# 13. Runtime path validation for artifact saving and ZIP packaging
+def test_artifact_saving_and_packaging_runtime_path(tmp_path: Path):
+    output_dir = tmp_path / "outputs_bert_baselines"
+    ckpt_dir = output_dir / "checkpoints" / "bert_sc_static"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    config = {
+        "model_name": "bert-base-uncased",
+        "output_dir": output_dir,
+        "epochs": 3,
+        "seed": 42,
+    }
+
+    # 1. Preflight check
+    safe_config = serialize_run_config(config)
+    preflight_json = json.dumps(safe_config, indent=2)
+    assert "outputs_bert_baselines" in preflight_json
+
+    # 2. Save model weights
+    dummy_model = torch.nn.Linear(4, 2)
+    torch.save(dummy_model.state_dict(), ckpt_dir / "model.pt")
+
+    # 3. Save tokenizer & config mock files
+    (ckpt_dir / "tokenizer_config.json").write_text('{"do_lower_case": true}', encoding="utf-8")
+    (ckpt_dir / "vocab.txt").write_text("[CLS]\n[SEP]\n", encoding="utf-8")
+    (ckpt_dir / "config.json").write_text('{"architectures": ["BertForSequenceClassification"]}', encoding="utf-8")
+
+    # 4. Save run metadata and validation metrics
+    val_metrics = {
+        "accuracy": 0.65,
+        "macro_f1": 0.64,
+        "f1": 0.66,
+        "positive_alert_coverage": 0.70,
+        "negative_false_alert_rate": 0.35,
+    }
+    run_metadata = {
+        "hyperparameters": safe_config,
+        "best_validation_metrics": val_metrics,
+    }
+    with open(ckpt_dir / "run_config.json", "w", encoding="utf-8") as f:
+        json.dump(run_metadata, f, indent=2)
+    with open(ckpt_dir / "val_metrics.json", "w", encoding="utf-8") as f:
+        json.dump(val_metrics, f, indent=2)
+
+    # 5. Save consolidated metrics file
+    final_metrics_file = output_dir / "bert_baselines_validation_metrics.json"
+    final_results = {
+        "metadata": {"hyperparameters": safe_config},
+        "bert_sc_static": {"validation_evaluation": val_metrics},
+    }
+    with open(final_metrics_file, "w", encoding="utf-8") as f:
+        json.dump(final_results, f, indent=2)
+
+    # 6. Test ZIP packaging
+    zip_base = tmp_path / "convoguard_phase2_bert_outputs"
+    zip_archive = shutil.make_archive(str(zip_base), "zip", root_dir=output_dir)
+    assert Path(zip_archive).exists()
+    assert Path(zip_archive).stat().st_size > 0
+
+    # 7. Verify ZIP contents
+    with zipfile.ZipFile(zip_archive, "r") as zf:
+        namelist = zf.namelist()
+        assert any("model.pt" in name for name in namelist)
+        assert any("run_config.json" in name for name in namelist)
+        assert any("val_metrics.json" in name for name in namelist)
+        assert any("bert_baselines_validation_metrics.json" in name for name in namelist)
+
+        # Inspect uncorrupted extraction of run_config.json
+        run_cfg_name = [n for n in namelist if "run_config.json" in n][0]
+        with zf.open(run_cfg_name) as rcf:
+            recovered_meta = json.load(rcf)
+            assert recovered_meta["hyperparameters"]["seed"] == 42
+            assert recovered_meta["best_validation_metrics"]["macro_f1"] == 0.64
 
