@@ -24,7 +24,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-import torch
 
 from convoguard.config import serialize_run_config
 from convoguard.data.forecasting import (
@@ -39,7 +38,6 @@ from convoguard.models.artifacts import (
     save_model_artifacts,
 )
 from convoguard.models.baselines import PriorBaseline, StaticTfidfBaseline
-from convoguard.models.bert import turn_preserving_truncate
 from convoguard.models.evaluation import (
     aggregate_dynamic_predictions,
     compute_forecast_horizon_metrics,
@@ -381,6 +379,12 @@ def test_baseline_finite_probability_outputs(sample_conversations_df: pd.DataFra
 
 # 9. Turn-preserving recursive truncation behavior
 def test_turn_preserving_truncation_behavior():
+    pytest.importorskip("torch", reason="BERT truncation test requires optional BERT dependencies")
+    pytest.importorskip(
+        "transformers", reason="BERT truncation test requires optional BERT dependencies"
+    )
+    from convoguard.models.bert import turn_preserving_truncate
+
     tokenizer = MockTokenizer()
     turns = [
         "short turn one",
@@ -500,6 +504,9 @@ def test_serialize_run_config_with_path_objects():
 
 # 13. Runtime path validation for artifact saving and ZIP packaging
 def test_artifact_saving_and_packaging_runtime_path(tmp_path: Path):
+    torch = pytest.importorskip(
+        "torch", reason="Model artifact persistence test requires the optional BERT extra"
+    )
     output_dir = tmp_path / "outputs_bert_baselines"
     ckpt_dir = output_dir / "checkpoints" / "bert_sc_static"
 
